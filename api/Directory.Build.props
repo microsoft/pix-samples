@@ -1,0 +1,150 @@
+<Project>
+  <!--
+    Shared PIX discovery for all API samples.
+
+    PixInstallDir is resolved from the first available of:
+      1. /p:PixInstallDir=<path> on the command line
+      2. the PIX_DIR environment variable
+      3. a convention-path scan of %ProgramFiles%\Microsoft PIX Preview\<version>\
+
+    The scan takes the newest <version> subdirectory whose date is strictly
+    after the _PixPreviewMinDate cutoff. PIX names versions YYMM.DD[.NNN][-flavor]
+    (the build number is absent on some flavors, e.g. unsigned builds named
+    YYMM.DD-preview-unsigned), so the lexically-greatest name is the newest
+    build; builds on or before the cutoff are incompatible with these samples
+    and are ignored.
+
+    This newest-Preview-build heuristic is a temporary arrangement for the PIX
+    API preview. The retail PIX API release is expected to provide a more robust
+    discovery mechanism, at which point this scan should be revisited.
+
+    Only the Preview flavor is scanned. The Experimental (...\Microsoft PIX
+    Experimental) and Retail (...\Microsoft PIX) flavors have no samples-
+    compatible build yet; the resolution block below marks where to add them.
+
+    Discovery does not read any HKLM\Software\Microsoft\PIX registry keys: the
+    installer doesn't write an InstallPath value at a well-known key, and the
+    samples must work against the shipping installer without changing its
+    registry footprint.
+
+    Everything resolves at MSBuild evaluation time, with no <Target> involvement,
+    so $(PixApiIncludeDir) and friends are bound into ItemDefinitionGroup metadata
+    (e.g. <AdditionalIncludeDirectories>) in the consuming vcxproj before its
+    items are materialized. A target-based fallback would run too late: ClCompile
+    would already have captured the empty, unresolved values.
+
+    Expected install layout (relative to PixInstallDir):
+      include\PixApi.h, lib\PixApi.lib, pixapi.dll, PixApiCsExt.dll
+  -->
+
+  <PropertyGroup>
+    <!-- Track whether PixInstallDir came from the caller (via /p:PixInstallDir
+         or PIX_DIR) rather than the convention scan. The ambiguity check in the
+         validation target only applies to auto-resolved Preview installs. -->
+    <_PixInstallDirWasUserSupplied Condition="'$(PixInstallDir)' != ''">true</_PixInstallDirWasUserSupplied>
+    <PixInstallDir Condition="'$(PixInstallDir)' == ''">$(PIX_DIR)</PixInstallDir>
+    <_PixInstallDirWasUserSupplied Condition="'$(_PixInstallDirWasUserSupplied)' == '' And '$(PixInstallDir)' != ''">true</_PixInstallDirWasUserSupplied>
+
+    <!-- Program Files root the Preview scan searches. ProgramW6432 is tried
+         first so a 32-bit MSBuild still finds the 64-bit install; ProgramFiles
+         and a hard-coded default cover the rest. -->
+    <_PixProgramFiles Condition="'$(_PixProgramFiles)' == ''">$(ProgramW6432)</_PixProgramFiles>
+    <_PixProgramFiles Condition="'$(_PixProgramFiles)' == ''">$(ProgramFiles)</_PixProgramFiles>
+    <_PixProgramFiles Condition="'$(_PixProgramFiles)' == ''">C:\Program Files</_PixProgramFiles>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Cutoff for the Preview scan: builds dated on or before this YYMM.DD
+         stamp are incompatible with the samples and are skipped. PIX names
+         version dirs YYMM.DD.NNN[-flavor], so 2026/06/15 is 2606.15. Encoding
+         the day as the .DD fraction of the YYMM month keeps the stamp monotonic
+         with the calendar (2606.31 < 2607.01), so System.Version compares stamps
+         as dates. Raise this when a newer Preview floor is required. -->
+    <_PixPreviewMinDate>2606.15</_PixPreviewMinDate>
+
+    <!-- Installed Preview version dirs as a ';'-joined list. GetDirectories
+         returns them in alphabetical (hence, for YYMM versions, chronological)
+         order, so the list runs oldest-to-newest. The pick is expressed with
+         string/version property functions rather than an item filter because
+         resolution runs at evaluation time, where item metadata isn't yet
+         available. -->
+    <_PixPreviewVersions Condition="'$(PixInstallDir)' == '' And Exists('$(_PixProgramFiles)\Microsoft PIX Preview')">$([System.IO.Directory]::GetDirectories('$(_PixProgramFiles)\Microsoft PIX Preview'))</_PixPreviewVersions>
+
+    <!-- Newest install = last entry of the list. Its YYMM.DD date stamp is
+         derived from the leaf folder name (after the last '\') in two steps:
+           1. drop any flavor suffix (everything from the first '-', e.g.
+              '-preview', '-preview-unsigned'), then
+           2. keep the first two dot-separated components, dropping any trailing
+              '.NNN' build number.
+         Step 2 can't simply strip the last dot: some flavors omit the build
+         number (e.g. unsigned builds named YYMM.DD-preview-unsigned), which
+         would leave the YYMM.DD dot as the only one and yield just YYMM. -->
+    <_PixPreviewNewest Condition="'$(_PixPreviewVersions)' != ''">$(_PixPreviewVersions.Substring($([MSBuild]::Add($(_PixPreviewVersions.LastIndexOf(';')), 1))))</_PixPreviewNewest>
+    <_PixPreviewNewestLeaf Condition="'$(_PixPreviewNewest)' != ''">$(_PixPreviewNewest.Substring($([MSBuild]::Add($(_PixPreviewNewest.LastIndexOf('\')), 1))))</_PixPreviewNewestLeaf>
+    <_PixPreviewNewestNoFlavor Condition="'$(_PixPreviewNewestLeaf)' != ''">$(_PixPreviewNewestLeaf)</_PixPreviewNewestNoFlavor>
+    <_PixPreviewNewestNoFlavor Condition="'$(_PixPreviewNewestNoFlavor)' != '' And $(_PixPreviewNewestNoFlavor.Contains('-'))">$(_PixPreviewNewestNoFlavor.Substring(0, $(_PixPreviewNewestNoFlavor.IndexOf('-'))))</_PixPreviewNewestNoFlavor>
+    <_PixPreviewNewestDate Condition="'$(_PixPreviewNewestNoFlavor)' != ''">$(_PixPreviewNewestNoFlavor)</_PixPreviewNewestDate>
+    <_PixPreviewNewestDate Condition="'$(_PixPreviewNewestDate)' != '' And $(_PixPreviewNewestDate.IndexOf('.')) != $(_PixPreviewNewestDate.LastIndexOf('.'))">$(_PixPreviewNewestDate.Substring(0, $(_PixPreviewNewestDate.LastIndexOf('.'))))</_PixPreviewNewestDate>
+
+    <!-- Second-newest date stamp, used by the ambiguity check in the validation
+         target: drop the newest entry, then take the last of what remains.
+         Empty when only one install is present. -->
+    <_PixPreviewRest Condition="'$(_PixPreviewVersions)' != '' And $(_PixPreviewVersions.Contains(';'))">$(_PixPreviewVersions.Substring(0, $(_PixPreviewVersions.LastIndexOf(';'))))</_PixPreviewRest>
+    <_PixPreviewSecond Condition="'$(_PixPreviewRest)' != ''">$(_PixPreviewRest.Substring($([MSBuild]::Add($(_PixPreviewRest.LastIndexOf(';')), 1))))</_PixPreviewSecond>
+    <_PixPreviewSecondLeaf Condition="'$(_PixPreviewSecond)' != ''">$(_PixPreviewSecond.Substring($([MSBuild]::Add($(_PixPreviewSecond.LastIndexOf('\')), 1))))</_PixPreviewSecondLeaf>
+    <!-- Same two-step parse as the newest stamp above: strip the flavor suffix,
+         then keep the first two dot-separated components. -->
+    <_PixPreviewSecondNoFlavor Condition="'$(_PixPreviewSecondLeaf)' != ''">$(_PixPreviewSecondLeaf)</_PixPreviewSecondNoFlavor>
+    <_PixPreviewSecondNoFlavor Condition="'$(_PixPreviewSecondNoFlavor)' != '' And $(_PixPreviewSecondNoFlavor.Contains('-'))">$(_PixPreviewSecondNoFlavor.Substring(0, $(_PixPreviewSecondNoFlavor.IndexOf('-'))))</_PixPreviewSecondNoFlavor>
+    <_PixPreviewSecondDate Condition="'$(_PixPreviewSecondNoFlavor)' != ''">$(_PixPreviewSecondNoFlavor)</_PixPreviewSecondDate>
+    <_PixPreviewSecondDate Condition="'$(_PixPreviewSecondDate)' != '' And $(_PixPreviewSecondDate.IndexOf('.')) != $(_PixPreviewSecondDate.LastIndexOf('.'))">$(_PixPreviewSecondDate.Substring(0, $(_PixPreviewSecondDate.LastIndexOf('.'))))</_PixPreviewSecondDate>
+
+    <!-- Resolve to the newest Preview only if it is dated strictly after the
+         cutoff. Since it is the newest, a newest that fails the cutoff means no
+         installed build qualifies and PixInstallDir is left empty. -->
+    <PixInstallDir Condition="'$(PixInstallDir)' == '' And '$(_PixPreviewNewestDate)' != '' And $([MSBuild]::VersionGreaterThan('$(_PixPreviewNewestDate)', '$(_PixPreviewMinDate)'))">$(_PixPreviewNewest)</PixInstallDir>
+
+    <!-- Experimental and Retail are intentionally not scanned: neither ships a
+         samples-compatible build yet. When that changes, add their scans here
+         (newest under ...\Microsoft PIX Experimental and ...\Microsoft PIX),
+         each guarded by '$(PixInstallDir)' == '' so an explicit or Preview
+         result still wins. -->
+  </PropertyGroup>
+
+  <Target Name="ValidatePixInstallDir" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(PixInstallDir)' == ''"
+           Text="No usable PIX installation found. Install a PIX Preview build with a version greater than $(_PixPreviewMinDate) (which puts headers under %ProgramFiles%\Microsoft PIX Preview\&lt;version&gt;\); earlier Preview builds are incompatible with these samples and are ignored. Alternatively set the PIX_DIR environment variable or pass /p:PixInstallDir=&lt;path&gt; on the command line to point at a specific install." />
+    <Error Condition="!Exists('$(PixInstallDir)\include\PixApi.h')"
+           Text="PIX installation at '$(PixInstallDir)' does not contain include\PixApi.h. Verify your PIX installation is complete." />
+    <!-- The newest-install pick relies on enumeration order, which is
+         alphabetical (so chronological for YYMM versions) on NTFS in practice
+         but not guaranteed by .NET. Rather than silently trust that order when
+         more than one usable build is installed, surface the ambiguity and ask
+         the user to choose. Two builds qualify exactly when the second-newest
+         stamp is also past the cutoff, since older builds are already excluded. -->
+    <Error Condition="'$(_PixInstallDirWasUserSupplied)' != 'true' And '$(_PixPreviewSecondDate)' != '' And $([MSBuild]::VersionGreaterThan('$(_PixPreviewSecondDate)', '$(_PixPreviewMinDate)'))"
+           Text="Multiple PIX Preview installations dated after $(_PixPreviewMinDate) were found ($(_PixPreviewVersions)). Set the PIX_DIR environment variable or pass /p:PixInstallDir=&lt;path&gt; to pick a specific version." />
+  </Target>
+
+  <PropertyGroup>
+    <PixApiIncludeDir>$(PixInstallDir)\include</PixApiIncludeDir>
+    <PixApiExperimentalIncludeDir>$(PixInstallDir)\include\experimental</PixApiExperimentalIncludeDir>
+    <PixApiLibDir>$(PixInstallDir)\lib</PixApiLibDir>
+    <PixApiBinDir>$(PixInstallDir)</PixApiBinDir>
+  </PropertyGroup>
+
+  <!--
+    For C# samples only: link in the shared PixApiResolver bootstrap.
+    It registers an AssemblyLoadContext.Default.Resolving hook in a
+    [ModuleInitializer] so PixApiCsExt[.experimental].dll loads from
+    %PIX_DIR% (the full PIX install) rather than from the sample's
+    output dir. That keeps the SxS invariant pixapi.dll's dll resolver
+    depends on without copying ~15 MB (or ~100 MB with GPU plugins) of
+    native PIX runtime into every sample bin.
+  -->
+  <ItemGroup Condition="'$(MSBuildProjectExtension)' == '.csproj'">
+    <Compile Include="$(MSBuildThisFileDirectory)PixApiResolver.cs"
+             Link="Internal\PixApiResolver.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,28 @@
+# Build outputs
+x64/
+ARM64/
+bin/
+obj/
+Debug/
+Release/
+
+# NuGet
+packages/
+
+# VS
+.vs/
+*.user
+*.suo
+
+# Intermediate
+*.obj
+*.pdb
+*.ilk
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Binaries copied for testing
+*.exe
