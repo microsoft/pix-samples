@@ -66,12 +66,20 @@ string GetAnnotationLink(IPixStringAnnotation annotation)
             return "Shader";
         case PIX_STRING_ANNOTATION_CONTEXT_TYPE.PIX_STRING_ANNOTATION_QUEUE:
             {
-                var queue = annotation.GetContext<IPixPostmortemQueueInfo>();
+                var queue = annotation.TryGetContext<IPixPostmortemQueueInfo>(out _);
+                if (queue == null)
+                {
+                    return string.Empty;
+                }
                 return queue.GetName().ToString() ?? string.Empty;
             }
         case PIX_STRING_ANNOTATION_CONTEXT_TYPE.PIX_STRING_ANNOTATION_EVENT:
             {
-                var evt = annotation.GetContext<IPixPostmortemEvent>();
+                var evt = annotation.TryGetContext<IPixPostmortemEvent>(out _);
+                if (evt == null)
+                {
+                    return string.Empty;
+                }
                 if (evt is IPixPostmortemD3D12ApiEvent apiEvent)
                 {
                     return $"[D3D API] {apiEvent.GetName()}";
@@ -106,7 +114,11 @@ string GetAnnotatedString(IPixAnnotatedString annotatedString)
     ulong annotationCount = annotations.GetCount();
     for (ulong i = 0ul; i < annotationCount; ++i)
     {
-        var annotation = annotations.Get<IPixStringAnnotation>(i);
+        var annotation = annotations.TryGet<IPixStringAnnotation>(i, out _);
+        if (annotation == null)
+        {
+            continue;
+        }
         var range = annotation.GetRange();
         int startIndex = (int)Math.Min(range.StartIndex, int.MaxValue);
         int length = (int)Math.Min(range.Length, int.MaxValue);
@@ -159,11 +171,17 @@ void DumpDeviceErrorBucket(IPixPostmortemDocument document)
     Console.WriteLine($"Bucket Name: {document.GetDeviceErrorBucket()}");
     Console.WriteLine($"Documentation Link: {GetString(document.GetDocumentationLink().ToString())}");
 
-    var briefSummary = document.GetBriefSummary();
-    Console.WriteLine($"Brief Summary: {GetAnnotatedString(briefSummary)}");
+    var briefSummary = document.TryGetBriefSummary(out _);
+    if (briefSummary != null)
+    {
+        Console.WriteLine($"Brief Summary: {GetAnnotatedString(briefSummary)}");
+    }
 
-    var detailedSummary = document.GetDetailedSummary();
-    Console.WriteLine($"Detailed Summary: {GetAnnotatedString(detailedSummary)}");
+    var detailedSummary = document.TryGetDetailedSummary(out _);
+    if (detailedSummary != null)
+    {
+        Console.WriteLine($"Detailed Summary: {GetAnnotatedString(detailedSummary)}");
+    }
 }
 
 void DumpResource(IPixPostmortemD3D12Resource resource, int numTabs)
@@ -188,14 +206,22 @@ void DumpResource(IPixPostmortemD3D12Resource resource, int numTabs)
         Console.WriteLine($"{tabs}\tAttribute[{i}]: {attr.Name} ({attr.Description}) = {DumpPixValue(attr.Value)}");
     }
 
-    var resourceEvents = resource.GetEvents();
+    var resourceEvents = resource.TryGetEvents(out _);
+    if (resourceEvents == null)
+    {
+        return;
+    }
     ulong eventCount = resourceEvents.GetCount();
     if (eventCount > 0)
     {
         Console.WriteLine($"{tabs}\tResource events ({eventCount}):");
         for (ulong i = 0ul; i < eventCount; ++i)
         {
-            var resourceEvent = resourceEvents.Get<IPixPostmortemResourceEvent>(i);
+            var resourceEvent = resourceEvents.TryGet<IPixPostmortemResourceEvent>(i, out _);
+            if (resourceEvent == null)
+            {
+                continue;
+            }
             var ts = resourceEvent.GetTimestampInNs();
             Console.WriteLine($"{tabs}\t\t[{i}] {resourceEvent.GetType()} @ {ts} ns");
         }
@@ -204,26 +230,43 @@ void DumpResource(IPixPostmortemD3D12Resource resource, int numTabs)
 
 void DumpResources(IPixPostmortemDocument document)
 {
-    var resources = document.GetResources();
+    var resources = document.TryGetResources(out _);
+    if (resources == null)
+    {
+        return;
+    }
     ulong resourceCount = resources.GetCount();
     Console.WriteLine("\n===== Resources =====");
 
     for (ulong i = 0ul; i < resourceCount; ++i)
     {
+        var resource = resources.TryGet<IPixPostmortemD3D12Resource>(i, out _);
+        if (resource == null)
+        {
+            continue;
+        }
         Console.WriteLine();
-        DumpResource(resources.Get<IPixPostmortemD3D12Resource>(i), 0);
+        DumpResource(resource, 0);
     }
 }
 
 void DumpPageFaults(IPixPostmortemDocument document)
 {
-    var pageFaults = document.GetPageFaults();
+    var pageFaults = document.TryGetPageFaults(out _);
+    if (pageFaults == null)
+    {
+        return;
+    }
     ulong pageFaultCount = pageFaults.GetCount();
     Console.WriteLine("\n===== Page faults =====");
 
     for (ulong i = 0ul; i < pageFaultCount; ++i)
     {
-        var pageFault = pageFaults.Get<IPixPostmortemPageFault>(i);
+        var pageFault = pageFaults.TryGet<IPixPostmortemPageFault>(i, out _);
+        if (pageFault == null)
+        {
+            continue;
+        }
         ulong pageFaultTs = pageFault.GetTimestampInNs();
 
         Console.WriteLine($"\t[GPU VA: 0x{pageFault.GetGpuVirtualAddress():X} @ {pageFaultTs} ns]");
@@ -240,27 +283,26 @@ void DumpPageFaults(IPixPostmortemDocument document)
             Console.WriteLine("\t(unknown)");
         }
 
-        var resources = pageFault.GetResources();
-        ulong resourceCount = resources.GetCount();
-        Console.WriteLine("\tResources:");
-        for (ulong j = 0ul; j < resourceCount; ++j)
+        var resourceEvents = pageFault.TryGetResourceEvents(out _);
+        if (resourceEvents != null)
         {
-            DumpResource(resources.Get<IPixPostmortemD3D12Resource>(j), 2);
-        }
-
-        var resourceEvents = pageFault.GetResourceEvents();
-        ulong eventCount = resourceEvents.GetCount();
-        Console.WriteLine($"\tResource events ({eventCount}):");
-        for (ulong j = 0ul; j < eventCount; ++j)
-        {
-            var resourceEvent = resourceEvents.Get<IPixPostmortemResourceEvent>(j);
-            ulong ts = resourceEvent.GetTimestampInNs();
-            Console.WriteLine($"\t\t[{j}] {resourceEvent.GetType()} @ {ts} ns");
-
-            var resource = resourceEvent.TryGetResource(out _);
-            if (resource != null)
+            ulong eventCount = resourceEvents.GetCount();
+            Console.WriteLine($"\tResource events ({eventCount}):");
+            for (ulong j = 0ul; j < eventCount; ++j)
             {
-                Console.WriteLine($"\t\tResource: {GetString(resource.GetName().ToString(), "(unnamed)")}");
+                var resourceEvent = resourceEvents.TryGet<IPixPostmortemResourceEvent>(j, out _);
+                if (resourceEvent == null)
+                {
+                    continue;
+                }
+                ulong ts = resourceEvent.GetTimestampInNs();
+                Console.WriteLine($"\t\t[{j}] {resourceEvent.GetType()} @ {ts} ns");
+
+                var resource = resourceEvent.TryGetResource(out _);
+                if (resource != null)
+                {
+                    Console.WriteLine($"\t\tResource: {GetString(resource.GetName().ToString(), "(unnamed)")}");
+                }
             }
         }
     }
@@ -311,7 +353,11 @@ void DumpEvent(IPixPostmortemEvent evt, int numTabs)
             Console.WriteLine($"{tabs}  Correlated shaders ({shaderCount}):");
             for (ulong i = 0ul; i < shaderCount; ++i)
             {
-                var shader = shaders.Get<IPixShader>(i);
+                var shader = shaders.TryGet<IPixShader>(i, out _);
+                if (shader == null)
+                {
+                    continue;
+                }
                 Console.Write($"{tabs}\tShader");
                 uint hashSize = shader.GetHashSizeBytes();
                 if (hashSize > 0u)
@@ -338,7 +384,11 @@ void DumpEvent(IPixPostmortemEvent evt, int numTabs)
             Console.WriteLine($"{tabs}  Correlated resources ({resourceCount}):");
             for (ulong i = 0ul; i < resourceCount; ++i)
             {
-                var resource = resources.Get<IPixPostmortemD3D12Resource>(i);
+                var resource = resources.TryGet<IPixPostmortemD3D12Resource>(i, out _);
+                if (resource == null)
+                {
+                    continue;
+                }
                 Console.WriteLine($"{tabs}\t{GetString(resource.GetName().ToString())}");
             }
         }
@@ -347,12 +397,20 @@ void DumpEvent(IPixPostmortemEvent evt, int numTabs)
 
 void DumpChildEvents(IPixPostmortemEvent parentEvent, int numTabs)
 {
-    var childEvents = parentEvent.GetChildEvents();
+    var childEvents = parentEvent.TryGetChildEvents(out _);
+    if (childEvents == null)
+    {
+        return;
+    }
     ulong numChildEvents = childEvents.GetCount();
 
     for (ulong i = 0ul; i < numChildEvents; i++)
     {
-        var childEvent = childEvents.Get<IPixPostmortemEvent>(i);
+        var childEvent = childEvents.TryGet<IPixPostmortemEvent>(i, out _);
+        if (childEvent == null)
+        {
+            continue;
+        }
         DumpEvent(childEvent, numTabs);
         DumpChildEvents(childEvent, numTabs + 1);
     }
@@ -360,12 +418,20 @@ void DumpChildEvents(IPixPostmortemEvent parentEvent, int numTabs)
 
 void DumpQueueEvents(IPixPostmortemQueueInfo queue, int numTabs)
 {
-    var events = queue.GetEvents();
+    var events = queue.TryGetEvents(out _);
+    if (events == null)
+    {
+        return;
+    }
     ulong numEvents = events.GetCount();
 
     for (ulong i = 0ul; i < numEvents; i++)
     {
-        var rootEvent = events.Get<IPixPostmortemEvent>(i);
+        var rootEvent = events.TryGet<IPixPostmortemEvent>(i, out _);
+        if (rootEvent == null)
+        {
+            continue;
+        }
         DumpEvent(rootEvent, numTabs);
         DumpChildEvents(rootEvent, numTabs + 1);
     }
@@ -373,12 +439,20 @@ void DumpQueueEvents(IPixPostmortemQueueInfo queue, int numTabs)
 
 void DumpEngineQueues(IPixPostmortemDocument document)
 {
-    var queues = document.GetQueues();
+    var queues = document.TryGetQueues(out _);
+    if (queues == null)
+    {
+        return;
+    }
     Console.WriteLine("\n===== Engine queues =====");
 
     for (ulong i = 0ul; i < queues.GetCount(); i++)
     {
-        var queueInfo = queues.Get<IPixPostmortemQueueInfo>(i);
+        var queueInfo = queues.TryGet<IPixPostmortemQueueInfo>(i, out _);
+        if (queueInfo == null)
+        {
+            continue;
+        }
 
         Console.WriteLine($"\n===== [{queueInfo.GetName()}] =====");
         Console.WriteLine($"\tType: {queueInfo.GetType()}");
@@ -395,17 +469,24 @@ void DumpEngineQueues(IPixPostmortemDocument document)
             }
         }
 
-        var pageFaults = queueInfo.GetPageFaults();
-        ulong pageFaultCount = pageFaults.GetCount();
-        if (pageFaultCount > 0ul)
+        var pageFaults = PixApiExtensions.TryInvoke(queueInfo.GetPageFaults, out _);
+        if (pageFaults != null)
         {
-            Console.WriteLine("\n\tPage faults:");
-            for (ulong j = 0ul; j < pageFaultCount; ++j)
+            ulong pageFaultCount = pageFaults.GetCount();
+            if (pageFaultCount > 0ul)
             {
-                var pageFault = pageFaults.Get<IPixPostmortemPageFault>(j);
-                Console.WriteLine($"\t  [GPU VA: 0x{pageFault.GetGpuVirtualAddress():X}]");
-                Console.WriteLine($"\t\tType: {pageFault.GetType()}");
-                Console.WriteLine($"\t\tAccess Type: {pageFault.GetAccessType()}");
+                Console.WriteLine("\n\tPage faults:");
+                for (ulong j = 0ul; j < pageFaultCount; ++j)
+                {
+                    var pageFault = pageFaults.TryGet<IPixPostmortemPageFault>(j, out _);
+                    if (pageFault == null)
+                    {
+                        continue;
+                    }
+                    Console.WriteLine($"\t  [GPU VA: 0x{pageFault.GetGpuVirtualAddress():X}]");
+                    Console.WriteLine($"\t\tType: {pageFault.GetType()}");
+                    Console.WriteLine($"\t\tAccess Type: {pageFault.GetAccessType()}");
+                }
             }
         }
 
@@ -431,7 +512,11 @@ void DumpGpuStateRow(IPixGpuStateTableRow row, uint numColumns, int depth)
     }
     Console.WriteLine();
 
-    var childRows = row.GetChildRows();
+    var childRows = row.TryGetChildRows(out _);
+    if (childRows == null)
+    {
+        return;
+    }
     ulong childCount = childRows.GetCount();
 
     if (childCount == 0ul)
@@ -441,7 +526,12 @@ void DumpGpuStateRow(IPixGpuStateTableRow row, uint numColumns, int depth)
 
     for (ulong j = 0ul; j < childCount; j++)
     {
-        DumpGpuStateRow(childRows.Get<IPixGpuStateTableRow>(j), numColumns, depth + 1);
+        var childRow = childRows.TryGet<IPixGpuStateTableRow>(j, out _);
+        if (childRow == null)
+        {
+            continue;
+        }
+        DumpGpuStateRow(childRow, numColumns, depth + 1);
     }
     Console.WriteLine();
 }
@@ -450,12 +540,20 @@ void DumpGpuStateAtDumpTime(IPixPostmortemDocument document)
 {
     Console.WriteLine("\n===== GPU state (at dump time) =====");
 
-    var gpuStateTables = document.GetGpuStateTables();
+    var gpuStateTables = document.TryGetGpuStateTables(out _);
+    if (gpuStateTables == null)
+    {
+        return;
+    }
     ulong numTables = gpuStateTables.GetCount();
 
     for (ulong i = 0ul; i < numTables; i++)
     {
-        var gpuStateTable = gpuStateTables.Get<IPixGpuStateTable>(i);
+        var gpuStateTable = gpuStateTables.TryGet<IPixGpuStateTable>(i, out _);
+        if (gpuStateTable == null)
+        {
+            continue;
+        }
 
         Console.WriteLine($"\n===== [{gpuStateTable.GetName()}] =====\n");
 
@@ -473,11 +571,20 @@ void DumpGpuStateAtDumpTime(IPixPostmortemDocument document)
         }
         Console.WriteLine("\n");
 
-        var rows = gpuStateTable.GetRows();
+        var rows = gpuStateTable.TryGetRows(out _);
+        if (rows == null)
+        {
+            continue;
+        }
         ulong numRootRows = rows.GetCount();
         for (ulong k = 0ul; k < numRootRows; k++)
         {
-            DumpGpuStateRow(rows.Get<IPixGpuStateTableRow>(k), numColumns, 0);
+            var row = rows.TryGet<IPixGpuStateTableRow>(k, out _);
+            if (row == null)
+            {
+                continue;
+            }
+            DumpGpuStateRow(row, numColumns, 0);
         }
         Console.WriteLine();
     }
@@ -485,13 +592,21 @@ void DumpGpuStateAtDumpTime(IPixPostmortemDocument document)
 
 void DumpApplicationBlobs(IPixPostmortemDocument document)
 {
-    var blobs = document.GetApplicationBlobs();
+    var blobs = PixApiExtensions.TryInvoke(document.GetApplicationBlobs, out _);
+    if (blobs == null)
+    {
+        return;
+    }
     ulong blobCount = blobs.GetCount();
     Console.WriteLine($"\n===== Application blobs ({blobCount}) =====");
 
     for (ulong i = 0ul; i < blobCount; ++i)
     {
-        var blob = blobs.Get<IPixApplicationBlob>(i);
+        var blob = blobs.TryGet<IPixApplicationBlob>(i, out _);
+        if (blob == null)
+        {
+            continue;
+        }
         Console.WriteLine($"\n  Blob [{i}]");
         Console.WriteLine($"  Metadata: 0x{blob.GetMetadata():X}");
         Console.WriteLine($"  Size: {blob.GetSizeBytes()} bytes");
@@ -507,25 +622,43 @@ void DumpShaderDebuggingData(IPixPostmortemDocument document)
         return;
     }
 
-    var waves = shaderDebuggingData.GetWaves();
+    var waves = shaderDebuggingData.TryGetWaves(out _);
+    if (waves == null)
+    {
+        return;
+    }
     ulong waveCount = waves.GetCount();
     Console.WriteLine($"\n===== Shader debugging data ({waveCount} waves) =====");
 
     for (ulong i = 0ul; i < waveCount; ++i)
     {
-        var wave = waves.Get<IPixShaderWave>(i);
+        var wave = waves.TryGet<IPixShaderWave>(i, out _);
+        if (wave == null)
+        {
+            continue;
+        }
         Console.WriteLine($"\n  Wave [{i}]");
         Console.WriteLine($"  Status: {wave.GetStatus()}");
         Console.WriteLine($"  Stage: {wave.GetStage()}");
 
-        var lanes = wave.GetLanes();
-        Console.WriteLine($"  Lane count: {lanes.GetCount()}");
+        var lanes = wave.TryGetLanes(out _);
+        if (lanes != null)
+        {
+            Console.WriteLine($"  Lane count: {lanes.GetCount()}");
+        }
     }
 }
 
 void OpenPostmortemDump(string dumpFile)
 {
-    var document = factory.OpenPostmortemDumpDocument(dumpFile, /*logger*/ null, /*notifications*/ null, /*cancellationToken*/ null);
+    var document = PixApiExtensions.TryInvoke(
+        () => factory.OpenPostmortemDumpDocument(dumpFile, /*logger*/ null, /*notifications*/ null, /*cancellationToken*/ null),
+        out var ex);
+    if (document == null)
+    {
+        Console.Error.WriteLine($"Failed to open dump '{dumpFile}': {ex?.Message}");
+        Environment.Exit(1);
+    }
 
     DumpMetadata(document);
     DumpDeviceErrorBucket(document);

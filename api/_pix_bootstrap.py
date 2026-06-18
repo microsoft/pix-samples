@@ -17,26 +17,42 @@ import os
 import struct
 
 
+def _parse_install_version(install_dir):
+    """Parse the YYMM.DD[.NNN] version from an install dir's leaf folder name
+    into a tuple of ints for chronological comparison.
+
+    PIX names version dirs YYMM.DD[.NNN][-flavor] (e.g. "2606.17-preview",
+    "2602.24.004-main"). Comparing parsed integer tuples orders versions numerically, 
+    so a single-digit field  like "2606.9" sorts before "2606.17" instead of after it.
+    Returns an empty tuple for an unparseable name so it sorts below every real version and is
+    never chosen as the newest.
+    """
+    leaf = os.path.basename(install_dir)
+    version = leaf.split("-", 1)[0]  # drop the flavor suffix
+    parts = []
+    for component in version.split("."):
+        if not component.isdigit():
+            return ()
+        parts.append(int(component))
+    return tuple(parts)
+
+
 def find_pix_bin_directory(marker):
     """Locate the PIX installation directory containing `marker`.
 
     Discovery order:
       1. PIX_DIR environment variable
-      2. Convention path scan: %ProgramFiles%/Microsoft PIX*/<version>/
+      2. Convention path scan: %ProgramFiles%/Microsoft PIX Preview/<version>/ 
+      (we ignore Microsoft PIX because PIX API is not shipped in a retail build yet)
 
     `marker` is the filename whose presence we use to validate that a
-    candidate directory is in fact a PIX install of the right flavor:
+    candidate directory is in fact a PIX install hosting the surface the
+    caller needs:
         - PixApiCsExt.dll                for retail samples
         - PixApiCsExt.experimental.dll   for preview samples
 
-    Preview installs ship both DLLs (the experimental surface is a superset
-    of the retail one), so the marker alone correctly selects a preview
-    install but does not exclude one when the caller asked for retail. For
-    retail samples (marker == "PixApiCsExt.dll") we prefer installs that
-    are not the experimental superset, so a side-by-side Preview + Retail
-    install picks the Retail one; if no retail-only install is present we
-    fall back to using the Preview install (which can still host the
-    retail surface).
+    A Preview install is a superset that ships both DLLs, so it can host
+    whichever marker the caller asks for.
 
     Skips registry discovery; the shipping PIX installer does not currently
     write a well-known InstallPath value, so the samples rely on the
@@ -52,40 +68,34 @@ def find_pix_bin_directory(marker):
     if not os.path.isdir(program_files):
         return None
 
-    prefer_retail_only = marker == "PixApiCsExt.dll"
-    experimental_marker = "PixApiCsExt.experimental.dll"
+    preview_root = os.path.join(program_files, "Microsoft PIX Preview")
+    if not os.path.isdir(preview_root):
+        return None
 
-    retail_only_candidates = []
-    other_candidates = []
+    candidates = []
     try:
-        for entry in os.listdir(program_files):
-            if not entry.startswith("Microsoft PIX"):
+        for version in os.listdir(preview_root):
+            install_dir = os.path.join(preview_root, version)
+            if not os.path.isfile(os.path.join(install_dir, marker)):
                 continue
-            flavor_dir = os.path.join(program_files, entry)
-            if not os.path.isdir(flavor_dir):
+            parsed_version = _parse_install_version(install_dir)
+            if not parsed_version:
+                # Skip directories whose name isn't a parseable PIX version, so
+                # a malformed dir can never be chosen as the newest install.
                 continue
-            for version in os.listdir(flavor_dir):
-                install_dir = os.path.join(flavor_dir, version)
-                if not os.path.isfile(os.path.join(install_dir, marker)):
-                    continue
-                has_experimental = os.path.isfile(os.path.join(install_dir, experimental_marker))
-                if prefer_retail_only and not has_experimental:
-                    retail_only_candidates.append(install_dir)
-                else:
-                    other_candidates.append(install_dir)
+            candidates.append((parsed_version, install_dir))
     except OSError:
         return None
 
-    # Prefer retail-only installs over Preview/Experimental superset installs
-    # when the caller asked for retail; otherwise both lists are equivalent.
-    chosen = retail_only_candidates if retail_only_candidates else other_candidates
-    if not chosen:
+    if not candidates:
         return None
 
-    # Sort by version dir name; PIX uses YYMM.DD.NNN[-flavor] which lex-sorts
-    # to chronological order, so the last entry is the newest install.
-    chosen.sort()
-    return os.path.abspath(chosen[-1])
+    # Sort by the parsed YYMM.DD[.NNN] version (newest last). Comparing the
+    # parsed integer tuple keeps the ordering correct regardless of zero-padding
+    # or build-number suffixes, so the fallback to the next-latest Preview build
+    # picks the right one.
+    candidates.sort()
+    return os.path.abspath(candidates[-1][1])
 
 
 def initialize_pythonnet(bin_directory, csext_dll_name):

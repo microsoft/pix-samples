@@ -38,73 +38,62 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
 from _pix_bootstrap import find_pix_bin_directory, initialize_pythonnet
 
+pix = None
+pix_extension = None
+pix_internal = None
+pix_postmortem = None
+
+def load_pix_namespaces():
+    """Import the Microsoft.PIX namespaces. Valid only after initialize_pythonnet()."""
+    global pix, pix_extension, pix_internal, pix_postmortem
+    import Microsoft.PIX as pix
+    import Microsoft.PIX.Extension as pix_extension
+    import Microsoft.PIX.Internal as pix_internal
+    import Microsoft.PIX.Internal.Extension.PostmortemDump as pix_postmortem
+
+
+def get_string(value, default="(none)"):
+    """Return a Python str, or `default` when it is null/empty. """
+    if value is None:
+        return default
+    text = value if isinstance(value, str) else value.ToString()
+    return text if text else default
+
+
 def dump_metadata(document):
     """Print dump file metadata."""
-    import Microsoft.PIX.Internal as pix_internal
-
     print("\n===== DirectX dump file metadata =====\n")
     print(f"Version: {document.GetVersion()}")
     print(f"Device Error Code: {document.GetDeviceErrorCode()}")
 
-    creation_time = document.GetCreationTime()
+    creation_time = pix.Internal_IPixPostmortemDocument_Extensions.GetCreationTime(document)
     print(f"Creation Time (FILETIME high={creation_time.dwHighDateTime}, low={creation_time.dwLowDateTime})")
 
-    app_desc = document.GetApplicationDescription()
-    print(f"Application Name: {app_desc.D3DApplicationDesc.pName}")
-    print(f"Executable: {app_desc.D3DApplicationDesc.pExeFilename}")
-    print(f"Engine Name: {app_desc.D3DApplicationDesc.pEngineName}")
+    app_desc = pix.Internal_IPixPostmortemDocument_Extensions.GetApplicationDescription(document)
+    print(f"Application Name: {get_string(app_desc.D3DApplicationDesc.pName)}")
+    print(f"Executable: {get_string(app_desc.D3DApplicationDesc.pExeFilename)}")
+    print(f"Engine Name: {get_string(app_desc.D3DApplicationDesc.pEngineName)}")
 
 
 def dump_device_error_bucket(document):
     """Print the device error bucket and summary."""
-    import Microsoft.PIX.Internal.Extension.PostmortemDump as pix_postmortem
-
     print("\n===== Device error bucket =====\n")
-    print(f"Bucket Name: {document.GetDeviceErrorBucket()}")
-    print(f"Documentation Link: {document.GetDocumentationLink()}")
+    print(f"Bucket Name: {get_string(document.GetDeviceErrorBucket())}")
+    print(f"Documentation Link: {get_string(document.GetDocumentationLink())}")
 
-    brief_summary = document.GetBriefSummary()
-    print(f"Brief Summary: {brief_summary.GetString()}")
+    brief_summary = pix_postmortem.PixApiExtensionsPostmortemDump.GetBriefSummary(document)
+    print(f"Brief Summary: {get_string(brief_summary.GetString())}")
 
-    detailed_summary = document.GetDetailedSummary()
-    print(f"Detailed Summary: {detailed_summary.GetString()}")
-
-
-def dump_queues(document):
-    """Print command queue events."""
-    import Microsoft.PIX as pix
-    import Microsoft.PIX.Extension as pix_extension
-    import Microsoft.PIX.Internal as pix_internal
-
-    queues = document.GetQueues()
-    print(f"\n===== Engine queues ({queues.GetCount()}) =====")
-
-    for queue_index in range(queues.GetCount()):
-        queue_info = pix_extension.PixApiExtensions.Get[
-            pix_internal.IPixPostmortemQueueInfo](queues, queue_index)
-
-        print(f"\n  [{queue_info.GetName()}]")
-        print(f"    Type: {queue_info.GetType()}")
-        print(f"    Status: {queue_info.GetStatus()}")
-
-        # Print root-level events.
-        events = queue_info.GetEvents()
-        event_count = events.GetCount()
-        print(f"    Events ({event_count}):")
-
-        for event_index in range(min(event_count, 20)):  # Limit output
-            event = pix_extension.PixApiExtensions.Get[
-                pix_internal.IPixPostmortemEvent](events, event_index)
-            dump_event(event, depth=3)
+    detailed_summary = pix_postmortem.PixApiExtensionsPostmortemDump.GetDetailedSummary(document)
+    print(f"Detailed Summary: {get_string(detailed_summary.GetString())}")
 
 
 def _try_cast(event, interface_type):
     """Try to QI `event` to `interface_type`. Returns the interface or None.
 
-    Pythonnet surfaces a failed QI as a CLR InvalidCastException, which gets
-    wrapped as a Python.Runtime.PythonException, not a built-in TypeError.
-    Catch the broad Exception base so any cast-related failure (CLR or
-    Python) falls through cleanly to the next branch.
+    Pythonnet surfaces a failed QI (CLR InvalidCastException) as a Python-side
+    exception, so catch the broad Exception base and let a failed cast fall
+    through cleanly to the next branch.
     """
     try:
         return interface_type(event)
@@ -112,18 +101,14 @@ def _try_cast(event, interface_type):
         return None
 
 
-def dump_event(event, depth=0):
-    """Print a single postmortem event.
+def _describe_event(event, indent):
+    """Print the one-line label for a single event, based on its concrete type.
 
-    Mirrors the C# variant's branch list: D3D12 API event, string marker,
-    custom marker, PIX marker, driver event. Falls back to status-only for
-    anything else.
+    Mirrors the C# variant's branch list: D3D12 API event, string marker, custom
+    marker, PIX marker, driver event. Falls back to status-only for anything
+    else. The specific event interface is obtained by QI-casting the generic
+    event (see _try_cast).
     """
-    import Microsoft.PIX as pix
-    import Microsoft.PIX.Internal as pix_internal
-
-    indent = "  " * depth
-
     api_event = _try_cast(event, pix_internal.IPixPostmortemD3D12ApiEvent)
     if api_event is not None:
         print(f"{indent}{api_event.GetName()}")
@@ -131,7 +116,7 @@ def dump_event(event, depth=0):
 
     string_marker = _try_cast(event, pix_internal.IPixPostmortemStringMarker)
     if string_marker is not None:
-        print(f'{indent}"{string_marker.GetPayload()}"')
+        print(f'{indent}"{get_string(string_marker.GetPayload())}"')
         return
 
     custom_marker = _try_cast(event, pix_internal.IPixPostmortemCustomMarker)
@@ -141,31 +126,57 @@ def dump_event(event, depth=0):
 
     pix_marker = _try_cast(event, pix_internal.IPixPostmortemPixMarker)
     if pix_marker is not None:
-        print(f"{indent}[MARKER] {pix_marker.GetName()}")
+        print(f"{indent}[MARKER] {get_string(pix_marker.GetName())}")
         return
 
     driver_event = _try_cast(event, pix_internal.IPixPostmortemDriverEvent)
     if driver_event is not None:
-        print(f"{indent}{driver_event.GetName()}")
+        print(f"{indent}{get_string(driver_event.GetName())}")
         return
 
     # Fallback: just print the status.
     print(f"{indent}[Event] Status: {event.GetStatus()}")
 
 
+def dump_event(event, depth=0):
+    """Print a single postmortem event and, recursively, its child events."""
+    _describe_event(event, "  " * depth)
+
+    child_events = pix_postmortem.PixApiExtensionsPostmortemDump.GetChildEvents(event)
+    for child_index in range(child_events.GetCount()):
+        child = pix_extension.PixApiExtensions.Get[pix_internal.IPixPostmortemEvent](child_events, child_index)
+        dump_event(child, depth + 1)
+
+
+def dump_queues(document):
+    """Print command queue events."""
+    queues = pix_postmortem.PixApiExtensionsPostmortemDump.GetQueues(document)
+    print(f"\n===== Engine queues ({queues.GetCount()}) =====")
+
+    for queue_index in range(queues.GetCount()):
+        queue_info = pix_extension.PixApiExtensions.Get[pix_internal.IPixPostmortemQueueInfo](queues, queue_index)
+
+        print(f"\n  [{get_string(queue_info.GetName())}]")
+        print(f"    Type: {queue_info.GetType()}")
+        print(f"    Status: {queue_info.GetStatus()}")
+
+        events = pix_postmortem.PixApiExtensionsPostmortemDump.GetEvents(queue_info)
+        event_count = events.GetCount()
+        print(f"    Events ({event_count}):")
+
+        for event_index in range(min(event_count, 20)):  # Limit output
+            event = pix_extension.PixApiExtensions.Get[pix_internal.IPixPostmortemEvent](events, event_index)
+            dump_event(event, depth=3)
+
+
 def dump_page_faults(document):
     """Print page fault information."""
-    import Microsoft.PIX as pix
-    import Microsoft.PIX.Extension as pix_extension
-    import Microsoft.PIX.Internal as pix_internal
-
-    page_faults = document.GetPageFaults()
+    page_faults = pix_postmortem.PixApiExtensionsPostmortemDump.GetPageFaults(document)
     page_fault_count = page_faults.GetCount()
     print(f"\n===== Page faults ({page_fault_count}) =====")
 
     for fault_index in range(page_fault_count):
-        page_fault = pix_extension.PixApiExtensions.Get[
-            pix_internal.IPixPostmortemPageFault](page_faults, fault_index)
+        page_fault = pix_extension.PixApiExtensions.Get[pix_internal.IPixPostmortemPageFault](page_faults, fault_index)
 
         print(f"\n  [GPU VA: 0x{page_fault.GetGpuVirtualAddress():X}]")
         print(f"    Type: {page_fault.GetType()}")
@@ -175,20 +186,14 @@ def dump_page_faults(document):
 
 def dump_resources(document):
     """Print resource information."""
-    import Microsoft.PIX as pix
-    import Microsoft.PIX.Extension as pix_extension
-    import Microsoft.PIX.Internal as pix_internal
-
-    resources = document.GetResources()
+    resources = pix_postmortem.PixApiExtensionsPostmortemDump.GetResources(document)
     resource_count = resources.GetCount()
     print(f"\n===== Resources ({resource_count}) =====")
 
     for resource_index in range(min(resource_count, 20)):  # Limit output
-        resource = pix_extension.PixApiExtensions.Get[
-            pix_internal.IPixPostmortemD3D12Resource](resources, resource_index)
+        resource = pix_extension.PixApiExtensions.Get[pix_internal.IPixPostmortemD3D12Resource](resources, resource_index)
 
-        name = resource.GetName() or "(unnamed)"
-        print(f"\n  {name}")
+        print(f"\n  {get_string(resource.GetName(), '(unnamed)')}")
         print(f"    GPU VA: 0x{resource.GetGpuVirtualAddress():X}")
         print(f"    Size: {resource.GetSizeBytes()} bytes")
 
@@ -210,25 +215,37 @@ def main():
     print(f"Using PIX binaries from: {bin_directory}")
 
     initialize_pythonnet(bin_directory, "PixApiCsExt.experimental.dll")
+    load_pix_namespaces()
+
+    # Catch the following exceptions caused by failed HRESULTS returned by the PIX API
+    from System import NotImplementedException
+    from System.Runtime.InteropServices import COMException
+    recoverable_errors = (COMException, NotImplementedException)
 
     # Open the postmortem dump document.
-    import Microsoft.PIX.Extension as pix_extension
-    import Microsoft.PIX.Internal as pix_internal
-    import Microsoft.PIX.Internal.Extension.PostmortemDump as pix_postmortem
-
     factory = pix_extension.PixApiExtensions.PixCreateFactory[pix_internal.IPixFactoryExperimental]()
     # IPixFactoryExperimental.OpenPostmortemDumpDocument takes a Win32 PCWSTR,
     # which pythonnet cannot construct from a Python str. Call the generated
     # extension method, which exposes a System.String overload.
-    document = pix_postmortem.PixApiExtensionsPostmortemDump.OpenPostmortemDumpDocument(
-        factory, dump_file_path, None, None, None)
+    try:
+        document = pix_postmortem.PixApiExtensionsPostmortemDump.OpenPostmortemDumpDocument(
+            factory, dump_file_path, None, None, None)
+    except recoverable_errors as ex:
+        print(f"Failed to open dump '{dump_file_path}': {ex.Message}")
+        return
 
-    # Dump all sections.
-    dump_metadata(document)
-    dump_device_error_bucket(document)
-    dump_queues(document)
-    dump_page_faults(document)
-    dump_resources(document)
+    sections = [
+        ("metadata", dump_metadata),
+        ("device error bucket", dump_device_error_bucket),
+        ("queues", dump_queues),
+        ("page faults", dump_page_faults),
+        ("resources", dump_resources),
+    ]
+    for label, dump_section in sections:
+        try:
+            dump_section(document)
+        except recoverable_errors as ex:
+            print(f"\n[skipped '{label}' section: {ex.Message}]")
 
     print("\nDone.")
 
